@@ -1,6 +1,8 @@
 from __future__ import annotations
 import streamlit as st
 import numpy as np
+import pandas as pd
+import time
 
 from src.io_utils import load_csv_bytes, coerce_date_close
 from src.strategy import sma_signals
@@ -9,6 +11,50 @@ from src.monte_carlo import iid_bootstrap_paths, block_bootstrap_paths, returns_
 from src.regimes import add_vol_regime, regime_summary
 from src.plots import fig_to_png_bytes, plot_price_sma, plot_equity, plot_hist, plot_fan
 from src.export import df_to_csv_bytes, dfs_to_excel_bytes, bundle_zip
+
+
+def live_simulation_panel(sim_eq: np.ndarray, frame_delay_ms: int = 40, sample_paths: int = 12) -> None:
+    """Animate a lightweight Monte Carlo replay for presentation/demo use."""
+    sim_eq = np.asarray(sim_eq, dtype=float)
+    n_steps, n_sims = sim_eq.shape
+    sample_paths = max(3, min(int(sample_paths), n_sims))
+
+    rng = np.random.default_rng(42)
+    chosen = rng.choice(n_sims, size=sample_paths, replace=False)
+    chosen_paths = sim_eq[:, chosen]
+
+    metric_a, metric_b, metric_c = st.columns(3)
+    chart_slot = st.empty()
+    progress = st.progress(0)
+
+    frame_idx = np.unique(np.linspace(2, n_steps, min(120, n_steps - 1), dtype=int))
+    for i, t in enumerate(frame_idx):
+        current = sim_eq[t - 1, :] - 1.0
+        p_profit = float((current > 0).mean() * 100.0)
+
+        metric_a.metric("Step", f"{t - 1}/{n_steps - 1}")
+        metric_b.metric("Median return", f"{np.median(current):.2%}")
+        metric_c.metric("P(final > 0)", f"{p_profit:.1f}%")
+
+        chart_df = pd.DataFrame(
+            {
+                "P05": np.quantile(sim_eq[:t, :], 0.05, axis=1),
+                "Median": np.quantile(sim_eq[:t, :], 0.50, axis=1),
+                "P95": np.quantile(sim_eq[:t, :], 0.95, axis=1),
+            },
+            index=np.arange(t),
+        )
+
+        for j in range(sample_paths):
+            chart_df[f"Path {j + 1}"] = chosen_paths[:t, j]
+
+        chart_slot.line_chart(chart_df, use_container_width=True)
+        progress.progress(int((i + 1) / len(frame_idx) * 100))
+
+        if frame_delay_ms > 0:
+            time.sleep(frame_delay_ms / 1000.0)
+
+    st.caption("Replay complete — blue fan lines show confidence cone, sample paths show scenario variety.")
 
 st.set_page_config(page_title="XAUUSD SMA + Monte Carlo", layout="wide")
 st.title("XAUUSD SMA Strategy + Monte Carlo Robustness Test")
@@ -29,6 +75,11 @@ with st.sidebar:
     n_sims = st.slider("Simulations", min_value=500, max_value=50000, value=5000, step=500)
     horizon_choice = st.selectbox("Simulation horizon", options=["Same as backtest length", "Custom"], index=0)
     seed = st.number_input("Random seed", min_value=0, max_value=10_000_000, value=7, step=1)
+    st.markdown("---")
+    st.header("Live demo")
+    show_live = st.checkbox("Show live simulation playback", value=True)
+    playback_ms = st.slider("Playback speed (ms/frame)", min_value=0, max_value=250, value=35, step=5)
+    playback_paths = st.slider("Animated sample paths", min_value=3, max_value=20, value=10, step=1)
 
     run_btn = st.button("Run", type="primary", use_container_width=True)
 
@@ -100,6 +151,11 @@ with d2:
              caption="Max drawdowns", use_container_width=True)
 with d3:
     st.image(fig_to_png_bytes(plot_fan(bands)), caption="Equity percentile bands", use_container_width=True)
+
+if show_live:
+    st.subheader("Live Monte Carlo Playback")
+    st.write("A short animated replay of how return outcomes evolve over time.")
+    live_simulation_panel(sim_eq, frame_delay_ms=int(playback_ms), sample_paths=int(playback_paths))
 
 real_final = float(bt["equity"].iloc[-1] - 1.0)
 p5, p50, p95 = [float(np.quantile(sim_metrics["Final_Return"], q)) for q in (0.05, 0.50, 0.95)]
